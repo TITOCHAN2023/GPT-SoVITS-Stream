@@ -34,6 +34,19 @@ from tts_server.redis_dao import RedisManager
 from tts_server.remote_http import RemoteHTTP
 from utils import get_maxkb_stream, get_llm_stream, Colors
 
+from tts_server.logger import logger
+from tts_server.middleware.mysql import session
+from tts_server.middleware.mysql.models.audio_voice import VoiceSchema
+from tts_server.middleware.mysql.models.audio_position import PositionSchema
+
+
+
+import dotenv
+dotenv.load_dotenv()
+audio_local_path = os.getenv("AUDIO_LOCAL_PATH")
+
+
+
 app = Quart(__name__)
 scheduler = AsyncIOScheduler()
 app = cors(app, allow_origin="*")
@@ -62,7 +75,7 @@ def init_worker():
     global tts
     config = TTS_Config("GPT_SoVITS/configs/tts_infer.yaml")
     if torch.cuda.is_available():
-        config.device = "cuda:3"
+        config.device = "cuda:6"
     else:
         config.device = "cpu"
     tts = TTS(config)
@@ -292,17 +305,23 @@ async def chat():
 
 
 # 单条文本转语音
-async def process_tts(text, request_id, rank=0):
+async def process_tts(text, voice,request_id, rank=0):
     text_hash = hashlib.md5(text.encode()).hexdigest()  
     index = text_hash
     task_control[request_id] = False  # 任务开始，打断设置为 false
 
+    with session() as conn:
+        voice=conn.query(VoiceSchema).filter(VoiceSchema.name==voice).first()
+        if voice is None:
+            return {"error": "Voice not found"}
+        input_audio_path = audio_local_path+voice.position
+
+
     loop = asyncio.get_event_loop()
     future = executor.submit(
         tts_run,
-        text,
-        input_audio_path,
-        input_text,
+        text=text,
+        ref_wav_path=input_audio_path,
         text_split_method="cut1",
         index=index,
         request_id=request_id,
@@ -366,14 +385,15 @@ async def comment_to_video(comment, request_id):
 async def tts():
     data = await request.get_json()
     text = data.get("text")
-    request_id = data.get("request_id")
-    rank = data.get("rank")
+    voice=data.get("voice")
+    request_id = "4000517517"
+    rank = "0"
 
     text_hash = hashlib.md5(text.encode()).hexdigest()
     execpt_out_put_path = f"stream_output_wav/output_{text_hash}.wav"
     if os.path.exists(execpt_out_put_path):
         return {"path": execpt_out_put_path}
-    res = await process_tts(text, request_id, rank)
+    res = await process_tts(text, voice,request_id, rank)
 
     return res
 
@@ -717,7 +737,7 @@ if __name__ == "__main__":
 
     dummy_workers()
     try:
-        app.run(host="0.0.0.0", port=5011, debug=False, use_reloader=False)
+        app.run(host="0.0.0.0", port=8176, debug=False, use_reloader=False)
     finally:
         clean_up()
         print("tts服务器已关闭")

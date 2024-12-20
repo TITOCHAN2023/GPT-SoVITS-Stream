@@ -16,6 +16,11 @@ import multiprocessing.resource_tracker
 import multiprocessing.spawn
 import multiprocessing.util
 
+from tts_server.logger import logger
+from tts_server.middleware.mysql import session
+from tts_server.middleware.mysql.models.audio_voice import VoiceSchema
+from tts_server.middleware.mysql.models.audio_position import PositionSchema
+
 app = Quart(__name__)
 max_workers = 4
 
