@@ -44,7 +44,7 @@ from tts_server.middleware.mysql.models.audio_position import PositionSchema
 import dotenv
 dotenv.load_dotenv()
 audio_local_path = os.getenv("AUDIO_LOCAL_PATH")
-
+remote_http = os.environ.get("REMOTE_PATH", "")
 
 
 app = Quart(__name__)
@@ -97,11 +97,11 @@ executor = ProcessPoolExecutor(
 
 
 def dummy_task():
-    print("进程初始化完成")
+    logger.info("进程初始化完成")
 
 
 def dummy_workers():
-    print("预热所有进程...")
+    logger.info("预热所有进程...")
     dummy_futures = []
 
     for _ in range(max_workers):
@@ -109,7 +109,7 @@ def dummy_workers():
         dummy_futures.append(future)
     for future in dummy_futures:
         future.result()
-    print("所有进程已完成初始化")
+    logger.info("所有进程已完成初始化")
 
 
 # 滑动窗口
@@ -174,40 +174,40 @@ def tts_run(
     sr = 32000
     output_path = f"stream_output_wav/output_{index}.wav"
 
-    print(f"运行任务 {index},request_id {request_id}")
+    logger.info(f"运行任务 {index},request_id {request_id}")
     pid = os.getpid()
     if task_control_dict[request_id]:
-        print(f"Worker {pid} ，任务{request_id}_{index}在执行前被取消")
+        logger.info(f"Worker {pid} ，任务{request_id}_{index}在执行前被取消")
         return output_path, index, sr, audio_data
 
     # 设置信号处理器
     def signal_handler(signum, frame):
-        print(f"Worker {pid} 收到信号 {signum}，准备取消任务")
+        logger.info(f"Worker {pid} 收到信号 {signum}，准备取消任务")
         raise TaskCancelledException("Task cancelled by signal")
 
     signal.signal(signal.SIGALRM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        print(f"tts_worker,id:{index} 开始推理...")
+        logger.info(f"tts_worker,id:{index} 开始推理...")
         start_time_inference = time()
         item = tts.run(inputs)
 
         for chunk in item:
             sr, audio_data = chunk
-            print(
+            logger.info(
                 f"{Colors.OKGREEN}inference_time_epoch_{inputs['text']}:{time()-start_time_inference:0.2f}秒{Colors.ENDC}"
             )
             output_path = f"stream_output_wav/output_{index}.wav"
             sf.write(output_path, audio_data, sr)
-            print(f"音频数据大小:{audio_data.shape}  ,{audio_data}")
+            logger.info(f"音频数据大小:{audio_data.shape}  ,{audio_data}")
         return output_path, index, sr, audio_data, text
 
     except TaskCancelledException:
-        print(f"tts_worker,id:{index} 任务被取消")
+        logger.info(f"tts_worker,id:{index} 任务被取消")
         return output_path, index, sr, audio_data, text
     except Exception as e:
-        print(f"tts_worker,id:{index} 任务执行失败 {e}")
+        logger.info(f"tts_worker,id:{index} 任务执行失败 {e}")
         raise
 
 
@@ -225,7 +225,7 @@ async def chat():
     question = goods_message + question
 
 
-    print(f"{Colors.OKGREEN}问题{question}{Colors.ENDC}")
+    logger.info(f"{Colors.OKGREEN}问题{question}{Colors.ENDC}")
     llm_stream = get_maxkb_stream(question=question)
     index = 1
     audio_manager = AudioStreamManager()
@@ -236,17 +236,17 @@ async def chat():
     def done_callback(future):
         try:
             output_path, idx, sr, audio_data, text = future.result()
-            print(f"任务完成，idx: {idx}")
+            logger.info(f"任务完成，idx: {idx}")
             audio_manager.add_audio(idx, audio_data, sr, text)
         except Exception as e:
-            print(f"{Colors.RED}任务被取消: {e}{Colors.ENDC}")
+            logger.info(f"{Colors.RED}任务被取消: {e}{Colors.ENDC}")
         finally:
             # 从活跃任务中移除
             if request_id in future_map and future in future_map[request_id]:
                 future_map[request_id].remove(future)
             # 如果所有任务完成，标记音频完成
             if stream_completed and not future_map[request_id]:
-                print(f"{Colors.OKGREEN}所有任务完成_done_callback{Colors.ENDC}")
+                logger.info(f"{Colors.OKGREEN}所有任务完成_done_callback{Colors.ENDC}")
                 audio_manager.mark_completed()
 
     # 创建任务
@@ -291,7 +291,7 @@ async def chat():
                 yield json.dumps(chunk_data) + "\n"
 
             elif audio_manager.is_completed:
-                print(f"{Colors.OKGREEN}所有任务完成_generate{Colors.ENDC}")
+                logger.info(f"{Colors.OKGREEN}所有任务完成_generate{Colors.ENDC}")
                 task_control.pop(request_id, None)
                 future_map.pop(request_id, None)
                 break
@@ -306,7 +306,7 @@ async def chat():
 
 # 单条文本转语音
 async def process_tts(text, voice,request_id, rank=0):
-    text_hash = hashlib.md5(text.encode()).hexdigest()  
+    text_hash = hashlib.md5((voice+text).encode()).hexdigest()  
     index = text_hash
     task_control[request_id] = False  # 任务开始，打断设置为 false
 
@@ -334,7 +334,7 @@ async def process_tts(text, voice,request_id, rank=0):
     # 返回相对路径，去掉前面的目录部分
     relative_path = os.path.basename(output_path)
     res = {
-        "path": f"stream_output_wav/{relative_path}",
+        "url": remote_http+"/audio/"+f"stream_output_wav/{relative_path}",
     }
     return res
 
@@ -352,7 +352,7 @@ async def audio_to_video(audio_path,text):
         async with session.post(base_url, data=form_data, timeout=timeout) as response:
             if response.status == 200:
                 result = await response.json()
-                print(f"视频生成成功，url: {result['video_url']}")
+                logger.info(f"视频生成成功，url: {result['video_url']}")
                 return result
             else:
                 return {"error": "Failed to generate video"}
@@ -383,16 +383,16 @@ async def comment_to_video(comment, request_id):
 # 音频的接口，输入文本，转音频
 @app.route("/tts", methods=["POST"])
 async def tts():
-    data = await request.get_json()
-    text = data.get("text")
-    voice=data.get("voice")
+    data = await request.form
+    text = data.get("content")
+    voice=data.get("voicename")
     request_id = "4000517517"
     rank = "0"
 
-    text_hash = hashlib.md5(text.encode()).hexdigest()
+    text_hash = hashlib.md5((voice+text).encode()).hexdigest()
     execpt_out_put_path = f"stream_output_wav/output_{text_hash}.wav"
     if os.path.exists(execpt_out_put_path):
-        return {"path": execpt_out_put_path}
+        return {"url": remote_http+"/audio/"+execpt_out_put_path}
     res = await process_tts(text, voice,request_id, rank)
 
     return res
@@ -414,22 +414,22 @@ async def tts_to_video():
 
 @app.route("/test", methods=["GET"])
 async def test():
-    print(f"我的 map长度{len(future_map)}")
-    print(f"map内容{future_map}")
+    logger.info(f"我的 map长度{len(future_map)}")
+    logger.info(f"map内容{future_map}")
     return str(len(future_map))
 
 
 @app.route("/kill", methods=["GET"])
 async def kill():
     request_id = request.args.get("request_id")
-    print(f"杀死{request_id}")
+    logger.info(f"杀死{request_id}")
     if request_id not in future_map:
-        print(f"{Colors.RED}杀死{request_id}失败{Colors.ENDC}")
-        print(future_map)
+        logger.info(f"{Colors.RED}杀死{request_id}失败{Colors.ENDC}")
+        logger.info(future_map)
         return "not found"
 
     start_time = time()
-    print(
+    logger.info(
         f"{Colors.OKGREEN}开始杀死{request_id} map长度{len(future_map)} {Colors.ENDC}"
     )
 
@@ -445,15 +445,15 @@ async def kill():
     current_process = psutil.Process()
     children = current_process.children(recursive=True)
     for child in children:
-        print(f"准备中断子进程 {child.pid}")
+        logger.info(f"准备中断子进程 {child.pid}")
         try:
             os.kill(child.pid, signal.SIGINT)
         except ProcessLookupError:
-            print(f"子进程 {child.pid} 不存在")
+            logger.info(f"子进程 {child.pid} 不存在")
             continue
 
     end_time = time()
-    print(
+    logger.info(
         f"map长度{Colors.OKGREEN} {len(future_map)} {Colors.ENDC},耗时{end_time-start_time}"
     )
     return str(len(future_map))
@@ -488,12 +488,12 @@ async def serve_audio(filename):
         return await send_file(file_path, mimetype="audio/wav")
 
     except Exception as e:
-        print(f"提供音频文件时出错: {e}")
+        logger.info(f"提供音频文件时出错: {e}")
         return "Internal server error", 500
 
 
 def clean_up():
-    print("清理资源...")
+    logger.info("清理资源...")
 
     # 清理音频文件
     # cleanup_audio_files()
@@ -509,7 +509,7 @@ def clean_up():
     # 终止所有子进程
     for child in children:
         try:
-            print(f"终止子进程 {child.pid}")
+            logger.info(f"终止子进程 {child.pid}")
             child.terminate()
         except psutil.NoSuchProcess:
             continue
@@ -521,7 +521,7 @@ def clean_up():
     for child in children:
         try:
             if child.is_running():
-                print(f"强制终止子进程 {child.pid}")
+                logger.info(f"强制终止子进程 {child.pid}")
                 child.kill()
         except psutil.NoSuchProcess:
             continue
@@ -545,19 +545,19 @@ def cleanup_audio_files():
                     try:
                         os.remove(file_path)
                     except Exception as e:
-                        print(f"删除文件 {file_path} 失败: {e}")
+                        logger.info(f"删除文件 {file_path} 失败: {e}")
     except Exception as e:
-        print(f"清理音频文件时出错: {e}")
+        logger.info(f"清理音频文件时出错: {e}")
 
 # 修改后的periodic_task函数
 async def periodic_task(job_id, interval, room_id, style, goods_info, choose_num):
-    print(f"{Colors.OKGREEN}定时任务执行于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.ENDC}")
+    logger.info(f"{Colors.OKGREEN}定时任务执行于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.ENDC}")
     remote_http = RemoteHTTP()
     
     # 获取弹幕和选择评论
     comments = remote_http.get_comment_from_bilibili(room_id, interval)
     # comments.append("这双鞋多少钱")
-    print(f"{Colors.OKGREEN}获取弹幕{comments}{Colors.ENDC}")
+    logger.info(f"{Colors.OKGREEN}获取弹幕{comments}{Colors.ENDC}")
     if not comments:
         return {"error": "comments is empty"}
     choose_comments = remote_http.choose_comment(goods_info, comments, choose_num)
@@ -565,12 +565,12 @@ async def periodic_task(job_id, interval, room_id, style, goods_info, choose_num
     # 用于跟踪所有任务的完成状态
     tasks = []
     answers = []
-    print(f"{Colors.OKGREEN}choose_comments{choose_comments}{Colors.ENDC}")
+    logger.info(f"{Colors.OKGREEN}choose_comments{choose_comments}{Colors.ENDC}")
     async def process_comment(choose_comment,goods_info):
         # 获取answer
         combined_message = f"商品信息: {goods_info}\n问题: {choose_comment}\n要求：回答字数20字以内"
         answer = remote_http.get_chat_completion(combined_message)
-        print(f"{Colors.OKGREEN}回答: {answer}{Colors.ENDC}")
+        logger.info(f"{Colors.OKGREEN}回答: {answer}{Colors.ENDC}")
         answers.append(answer)
         
         # 生成视频
@@ -587,7 +587,7 @@ async def periodic_task(job_id, interval, room_id, style, goods_info, choose_num
             "choose_comment": choose_comment,
             "answer": answer,
         }
-        print(f"{Colors.GREY}评论{choose_comment}  存入Redis{Colors.ENDC}")
+        logger.info(f"{Colors.GREY}评论{choose_comment}  存入Redis{Colors.ENDC}")
         redisManager.enqueue(queue_name, data)
         
         return answer
@@ -608,7 +608,7 @@ async def periodic_task(job_id, interval, room_id, style, goods_info, choose_num
                 job_id, comments, choose_comments, answers, "", ""
             )
         except Exception as e:
-            print(f"数据库更新失败: {e}")
+            logger.info(f"数据库更新失败: {e}")
 
     # 启动数据库更新任务但不等待
     asyncio.create_task(update_db())
@@ -626,7 +626,7 @@ async def start_periodic_task():
         return {"error": "缺少执行间隔字段"}, 400
 
     job_id = str(uuid.uuid4())
-    print(f"{Colors.OKGREEN}添加定时任务{job_id}{Colors.ENDC}")
+    logger.info(f"{Colors.OKGREEN}添加定时任务{job_id}{Colors.ENDC}")
     # 添加定时任务
     job = scheduler.add_job(
         periodic_task,
@@ -740,4 +740,4 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=8176, debug=False, use_reloader=False)
     finally:
         clean_up()
-        print("tts服务器已关闭")
+        logger.info("tts服务器已关闭")
